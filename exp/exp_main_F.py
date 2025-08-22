@@ -1,6 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import Informer, Autoformer, Transformer, DLinear, Linear, NLinear, SCINet, Film, FITS, Real_FITS
+from models import Informer, Autoformer, Transformer, DLinear, Linear, NLinear, SCINet, Film, FITS, Real_FITS, Flow_FITS
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 
@@ -35,7 +35,8 @@ class Exp_Main(Exp_Basic):
             'SCINet': SCINet,
             'Film': Film,
             'FITS': FITS,
-            'Real_FITS': Real_FITS
+            'Real_FITS': Real_FITS,
+            'Flow_FITS': Flow_FITS,
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -144,22 +145,6 @@ class Exp_Main(Exp_Basic):
                 # print(batch_x.shape, batch_y.shape)
                 batch_xy = torch.cat([batch_x, batch_y], dim=1)
 
-                # if self.args.in_batch_augmentation:
-                #     aug = augmentation('batch')
-                #     methods = {'f_mask':aug.freq_mask, 'f_mix': aug.freq_mix, 'noise':aug.noise,'noise_input':aug.noise_input}
-                #     for step in range(self.args.aug_data_size):
-                #         xy = methods[self.args.aug_method](batch_x, batch_y[:, -self.args.pred_len:, :], rate=self.args.aug_rate, dim=1)
-                #         batch_x2, batch_y2 = xy[:, :self.args.seq_len, :], xy[:, -self.args.label_len-self.args.pred_len:, :]
-                #         if 'noise' not in self.args.aug_method:
-                #             batch_x = torch.cat([batch_x,batch_x2],dim=0)
-                #             batch_y = torch.cat([batch_y,batch_y2],dim=0)
-                #             batch_x_mark = torch.cat([batch_x_mark,batch_x_mark],dim=0)
-                #             batch_y_mark = torch.cat([batch_y_mark,batch_y_mark],dim=0)
-                #         else:
-                #             print('noise')
-                #             batch_x = batch_x2
-                #             batch_y = batch_y2
-
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
@@ -175,18 +160,45 @@ class Exp_Main(Exp_Basic):
                     else:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
 
-                # print(outputs.shape,batch_y.shape)
                 f_dim = -1 if self.args.features == 'MS' else 0
-                if ft:
-                    outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    # print(outputs.shape,batch_xy.shape)
-                    #loss = criterion(outputs, batch_xy)
-                    loss = criterion(outputs, batch_y)
-                else: 
-                    outputs = outputs[:, :, f_dim:]
-                    # batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device) #???
-                    loss = criterion(outputs, batch_xy)
+                # unified full-output tensor
+                outputs_full = outputs[:, :, f_dim:]
+
+                # Flow Matching loss (when selected)
+                if getattr(self.args, 'loss', 'mse') == 'flow':
+                    # choose region for FM: prediction horizon only or full sequence
+                    if ft or getattr(self.args, 'flow_on_pred_only', False):
+                        x0 = outputs_full[:, -self.args.pred_len:, :]
+                        x1 = batch_y[:, -self.args.pred_len:, f_dim:]
+                    else:
+                        x0 = outputs_full
+                        x1 = batch_xy[:, :, f_dim:]
+
+                    # sample t in [t_min, t_max]
+                    t_min = getattr(self.args, 'flow_t_min', 0.0)
+                    t_max = getattr(self.args, 'flow_t_max', 1.0)
+                    t = torch.rand(x0.size(0), 1, 1, device=x0.device) * (t_max - t_min) + t_min
+                    x_t = (1.0 - t) * x0 + t * x1
+                    v_target = x1 - x0
+                    # call flow head
+                    flow_model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+                    if hasattr(flow_model, 'flow'):
+                        v_pred = flow_model.flow(x_t, t)
+                        loss = nn.functional.mse_loss(v_pred, v_target)
+                    else:
+                        # fallback to MSE if flow head not available
+                        if ft:
+                            loss = criterion(outputs_full[:, -self.args.pred_len:, :], x1)
+                        else:
+                            loss = criterion(outputs_full, x1)
+                else:
+                    if ft:
+                        outputs_use = outputs_full[:, -self.args.pred_len:, :]
+                        batch_y_use = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                        loss = criterion(outputs_use, batch_y_use)
+                    else:
+                        loss = criterion(outputs_full, batch_xy)
+
                 train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -274,13 +286,13 @@ class Exp_Main(Exp_Basic):
                 pred = outputs_  # outputs.detach().cpu().numpy()  # .squeeze()
                 true = batch_y  # batch_y.detach().cpu().numpy()  # .squeeze()
 
-                preds.append(pred)
-                trues.append(true)
+                preds.append(test_data.inverse_transform(pred))
+                trues.append(test_data.inverse_transform(true))
                 inputx.append(batch_x.detach().cpu().numpy())
                 inputxy.append(batch_xy.detach().cpu().numpy())
                 reconx.append(outputs[:, :-self.args.pred_len, f_dim:].detach().cpu().numpy())
                 reconxy.append(outputs.detach().cpu().numpy())
-                lows.append(low.detach().cpu().numpy())
+                # lows.append(low.detach().cpu().numpy())
                 if i % 20 == 0:
                     input = batch_x.detach().cpu().numpy()
                     gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
@@ -348,9 +360,9 @@ class Exp_Main(Exp_Basic):
         f.close()
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
-        np.save(folder_path + 'pred.npy', preds)
-        np.save(folder_path + 'true.npy', trues)
-        np.save(folder_path + 'x.npy', inputx)
+        # np.save(folder_path + 'pred.npy', preds)
+        # np.save(folder_path + 'true.npy', trues)
+        # np.save(folder_path + 'x.npy', inputx)
         return
 
     def predict(self, setting, load=False):

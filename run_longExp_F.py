@@ -13,7 +13,7 @@ parser = argparse.ArgumentParser(description='Autoformer & Transformer family fo
 parser.add_argument('--is_training', type=int, required=True, default=1, help='status')
 parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
 parser.add_argument('--model', type=str, required=True, default='Autoformer',
-                    help='model name, options: [Autoformer, Informer, Transformer]')
+                    help='model name, options: [Autoformer, Informer, Transformer, DLinear, Linear, NLinear, SCINet, Film, FITS, Real_FITS, Flow_FITS]')
 
 # data loader
 parser.add_argument('--data', type=str, required=True, default='ETTm1', help='dataset type')
@@ -74,7 +74,7 @@ parser.add_argument('--batch_size', type=int, default=32, help='batch size of tr
 parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
 parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
 parser.add_argument('--des', type=str, default='test', help='exp description')
-parser.add_argument('--loss', type=str, default='mse', help='loss function')
+parser.add_argument('--loss', type=str, default='mse', help='loss function, options:[mse, flow]')
 parser.add_argument('--lradj', type=str, default='type3', help='adjust learning rate')
 parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
 
@@ -104,6 +104,12 @@ parser.add_argument('--train_mode', type=int,default=0)
 parser.add_argument('--cut_freq', type=int,default=0)
 parser.add_argument('--base_T', type=int,default=24)
 parser.add_argument('--H_order', type=int,default=2)
+
+# Flow Matching options
+parser.add_argument('--flow_on_pred_only', action='store_true', default=False, help='apply flow matching loss only on prediction horizon')
+parser.add_argument('--flow_t_min', type=float, default=0.0, help='minimum time for flow sampling')
+parser.add_argument('--flow_t_max', type=float, default=1.0, help='maximum time for flow sampling')
+parser.add_argument('--flow_time_dim', type=int, default=16, help='time embedding dimension for flow head')
 
 args = parser.parse_args()
 
@@ -162,9 +168,9 @@ if args.is_training:
         print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
         exp.test(setting)
 
-        if args.do_predict:
-            print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-            exp.predict(setting, True)
+        # if args.do_predict:
+        #     print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+        #     exp.predict(setting, True)
 
         torch.cuda.empty_cache()
 else:
