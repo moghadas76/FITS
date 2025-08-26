@@ -18,6 +18,12 @@ import numpy as np
 
 from thop import profile
 
+# optional optuna import for pruning
+try:  # type: ignore
+    import optuna  # type: ignore
+except Exception:  # type: ignore
+    optuna = None  # type: ignore
+
 warnings.filterwarnings('ignore')
 
 class Exp_Main(Exp_Basic):
@@ -50,7 +56,8 @@ class Exp_Main(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self):
-        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        wd = getattr(self.args, 'weight_decay', 0.0)
+        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate, weight_decay=wd)
         print('!!!!!!!!!!!!!!learning rate!!!!!!!!!!!!!!!')
         print(self.args.learning_rate)
         return model_optim
@@ -105,7 +112,7 @@ class Exp_Main(Exp_Basic):
         self.model.train()
         return total_loss
 
-    def train(self, setting, ft=False):
+    def train(self, setting, ft=False, trial=None):
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
@@ -219,6 +226,17 @@ class Exp_Main(Exp_Basic):
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+
+            # Optuna pruning support
+            if trial is not None and optuna is not None:
+                try:
+                    trial.report(float(vali_loss), step=epoch)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+                except Exception:
+                    # if optuna internals not available, ignore pruning
+                    pass
+
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
@@ -304,46 +322,6 @@ class Exp_Main(Exp_Basic):
             exit()
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)
-        # inputx = np.array(inputx)
-        # reconx = np.array(reconx)
-        # reconxy = np.array(reconxy)
-        # inputxy = np.array(inputxy)
-        # lows = np.array(lows)
-
-
-        # preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-        # trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        # inputx = inputx.reshape(-1, inputx.shape[-2], inputx.shape[-1])
-        # reconx = reconx.reshape(-1, reconx.shape[-2], reconx.shape[-1])
-        # reconxy = reconxy.reshape(-1, reconxy.shape[-2], reconxy.shape[-1])
-        # inputxy = inputxy.reshape(-1, inputxy.shape[-2], inputxy.shape[-1])
-        # lows = lows.reshape(-1, lows.shape[-2], lows.shape[-1])
-
-        # try: 
-        #     for i in range(0,2800,300):
-                
-        #         # create a figure with 3 subplots
-        #         fig, axs = plt.subplots(3, 1, figsize=(10, 10))
-        #         # plot pred and true in the first subplot
-        #         axs[0].plot(trues[i, :, -1], label='true')
-        #         axs[0].plot(preds[i, :, -1], label='pred')
-        #         axs[0].set_title('pred and true')
-        #         # plot inputx and reconx in the second subplot
-        #         axs[1].plot(inputx[i, :, -1], label='inputx')
-        #         axs[1].plot(reconx[i, :, -1], label='reconx')
-        #         axs[1].set_title('inputx and reconx')
-        #         # plot inputxy and reconxy in the third subplot
-        #         axs[2].plot(inputxy[i, :, -1], label='inputxy')
-        #         axs[2].plot(reconxy[i, :, -1], label='reconxy')
-        #         axs[2].plot(lows[i, :, -1])
-        #         axs[2].set_title('inputxy and reconxy')
-        #         # show the legend
-        #         plt.legend()
-        #         # save the figure to file
-        #         fig.savefig(os.path.join(folder_path, str(i) + '_F.png'))
-        #         # print('plottting')
-        # except:
-        #     pass
 
         # result save
         folder_path = './results/' + setting + '/'
@@ -351,18 +329,14 @@ class Exp_Main(Exp_Basic):
             os.makedirs(folder_path)
 
         mae, mse, rmse, mape, mspe, rse, corr = metric(preds, trues)
-        print('mse:{}, mae:{}, rse:{}, corr:{}'.format(mse, mae, rse, corr))
+        print('mse:{}, mae:{}, rse:{}, corr:{}, rmse:{}'.format(mse, mae, rse, corr, rmse))
         f = open("result.txt", 'a')
         f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}, rse:{}, corr:{}'.format(mse, mae, rse, corr))
+        f.write('mse:{}, mae:{}, rse:{}, corr:{}, rmse:{}'.format(mse, mae, rse, corr, rmse))
         f.write('\n')
         f.write('\n')
         f.close()
 
-        # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
-        # np.save(folder_path + 'pred.npy', preds)
-        # np.save(folder_path + 'true.npy', trues)
-        # np.save(folder_path + 'x.npy', inputx)
         return
 
     def predict(self, setting, load=False):

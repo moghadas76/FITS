@@ -110,6 +110,16 @@ parser.add_argument('--flow_on_pred_only', action='store_true', default=False, h
 parser.add_argument('--flow_t_min', type=float, default=0.0, help='minimum time for flow sampling')
 parser.add_argument('--flow_t_max', type=float, default=1.0, help='maximum time for flow sampling')
 parser.add_argument('--flow_time_dim', type=int, default=16, help='time embedding dimension for flow head')
+parser.add_argument('--flow_hidden_multiplier', type=float, default=2.0, help='hidden width multiplier for flow head MLP')
+
+# Hyperparameter optimization (HPO) settings
+parser.add_argument('--hpo', action='store_true', help='Enable hyperparameter optimization')
+parser.add_argument('--initial_samples', type=int, default=5, help='Number of initial samples for HPO')
+parser.add_argument('--num_trials', type=int, default=10, help='Number of trials for HPO')
+parser.add_argument('--early_stopping', type=int, default=3, help='Patience for early stopping in HPO')
+parser.add_argument('--optimizer', type=str, default='adam', help='Optimizer for HPO, options: [adam, sgd, rmsprop]')
+parser.add_argument('--momentum', type=float, default=0.9, help='Momentum for SGD optimizer')
+parser.add_argument('--weight_decay', type=float, default=0.0001, help='Weight decay for regularization')
 
 args = parser.parse_args()
 
@@ -142,10 +152,30 @@ torch.cuda.empty_cache()
 
 Exp = Exp_Main
 
-if args.is_training:
-    for ii in range(args.itr):
-        # setting record of experiments
-        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_H{}_{}'.format(
+# ------------------------------
+# Optuna HPO path
+# ------------------------------
+if args.hpo:
+    try:
+        import optuna
+    except Exception as e:
+        raise RuntimeError("Optuna is required for --hpo. Please install it (pip install optuna).") from e
+
+    def objective(trial: 'optuna.trial.Trial'):
+        # Tune a subset of hyperparameters
+        args.learning_rate = trial.suggest_float('learning_rate', 1e-5, 5e-3, log=True)
+        args.weight_decay = trial.suggest_float('weight_decay', 1e-8, 1e-2, log=True)
+        args.flow_time_dim = trial.suggest_categorical('flow_time_dim', [8, 16, 32, 64])
+        args.flow_hidden_multiplier = trial.suggest_float('flow_hidden_multiplier', 0.5, 8.0, log=True)
+        # Prefer flow loss when using Flow_FITS
+        if args.model == 'Flow_FITS':
+            args.loss = 'flow'
+        # Slightly shorter training for HPO if very large
+        max_epochs = args.train_epochs
+        if max_epochs > 50:
+            args.train_epochs = 50
+
+        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_H{}_trial{}'.format(
             args.model_id,
             args.model,
             args.data,
@@ -153,39 +183,82 @@ if args.is_training:
             args.seq_len,
             args.label_len,
             args.pred_len,
-            args.H_order, ii)
+            args.H_order,
+            trial.number)
 
-        exp = Exp(args)  # set experiments
-        print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
-        if args.train_mode == 0:
-            exp.train(setting, ft=False) # train on xy
-        elif args.train_mode == 1:
-            exp.train(setting, ft=True) # train on y
-        elif args.train_mode == 2:
-            exp.train(setting, ft=False)
-            exp.train(setting, ft=True) # finetune
+        exp = Exp(args)
+        # delegate pruning via exp.train(trial=trial)
+        try:
+            if args.train_mode == 0:
+                exp.train(setting, ft=False, trial=trial)
+            elif args.train_mode == 1:
+                exp.train(setting, ft=True, trial=trial)
+            elif args.train_mode == 2:
+                exp.train(setting, ft=False, trial=trial)
+                exp.train(setting, ft=True, trial=trial)
+        except optuna.TrialPruned:
+            torch.cuda.empty_cache()
+            raise
 
-        print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-        exp.test(setting)
-
-        # if args.do_predict:
-        #     print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-        #     exp.predict(setting, True)
+        # evaluate on validation
+        criterion = exp._select_criterion()
+        _, vali_loader = exp._get_data(flag='val')
+        vali_loss = exp.vali(None, vali_loader, criterion)
 
         torch.cuda.empty_cache()
-else:
-    ii = 0
-    setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_H{}_{}'.format(
-            args.model_id,
-            args.model,
-            args.data,
-            args.features,
-            args.seq_len,
-            args.label_len,
-            args.pred_len,
-            args.H_order, ii)
+        return float(vali_loss)
 
-    exp = Exp(args)  # set experiments
-    print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-    exp.test(setting, test=1)
-    torch.cuda.empty_cache()
+    study = optuna.create_study(direction='minimize', storage='sqlite:///results_hpo.db', study_name='fits_hpo', load_if_exists=True)
+    study.optimize(objective, n_trials=args.num_trials, n_jobs=4)
+    print('Best trial:', study.best_trial.number)
+    print('Best value:', study.best_value)
+    print('Best params:', study.best_params)
+
+else:
+    if args.is_training:
+        for ii in range(args.itr):
+            # setting record of experiments
+            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_H{}_{}'.format(
+                args.model_id,
+                args.model,
+                args.data,
+                args.features,
+                args.seq_len,
+                args.label_len,
+                args.pred_len,
+                args.H_order, ii)
+
+            exp = Exp(args)  # set experiments
+            print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
+            if args.train_mode == 0:
+                exp.train(setting, ft=False) # train on xy
+            elif args.train_mode == 1:
+                exp.train(setting, ft=True) # train on y
+            elif args.train_mode == 2:
+                exp.train(setting, ft=False)
+                exp.train(setting, ft=True) # finetune
+
+            print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+            exp.test(setting)
+
+            # if args.do_predict:
+            #     print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+            #     exp.predict(setting, True)
+
+            torch.cuda.empty_cache()
+    else:
+        ii = 0
+        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_H{}_{}'.format(
+                args.model_id,
+                args.model,
+                args.data,
+                args.features,
+                args.seq_len,
+                args.label_len,
+                args.pred_len,
+                args.H_order, ii)
+
+        exp = Exp(args)  # set experiments
+        print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+        exp.test(setting, test=1)
+        torch.cuda.empty_cache()

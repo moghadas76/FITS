@@ -8,3 +8,4 @@ scikit_learn==1.5.2
 thop
 # torch==2.7.0
 tqdm==4.66.5
+optuna==3.6.1

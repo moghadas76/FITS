@@ -47,6 +47,7 @@ class Model(nn.Module):
 
         # flow head (built dynamically on first use to match actual channels)
         self.flow_time_dim = getattr(configs, 'flow_time_dim', 16)
+        self.flow_hidden_multiplier = float(getattr(configs, 'flow_hidden_multiplier', 2.0))
         self.t_embed = TimeEmbed(self.flow_time_dim)
         self.flow_net: nn.Module | None = None
         self._flow_in_dim = None
@@ -102,7 +103,7 @@ class Model(nn.Module):
         in_dim = c_in + self.flow_time_dim
         out_dim = c_in
         if (self.flow_net is None) or (self._flow_in_dim != in_dim) or (self._flow_out_dim != out_dim):
-            hidden = max(64, c_in * 2)
+            hidden = max(64, int(c_in * self.flow_hidden_multiplier))
             self.flow_net = nn.Sequential(
                 nn.Linear(in_dim, hidden),
                 nn.SiLU(),
